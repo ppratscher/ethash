@@ -115,42 +115,42 @@ type Light struct {
 }
 
 // Verify checks whether the block's nonce is valid.
-func (l *Light) Verify(block pow.Block) bool {
+func (l *Light) Verify(block pow.Block, shareDifficulty *big.Int, blockDifficulty *big.Int) (bool, bool) {
 	// TODO: do ethash_quick_verify before getCache in order
 	// to prevent DOS attacks.
 	blockNum := block.NumberU64()
 	if blockNum >= epochLength*2048 {
 		glog.V(logger.Debug).Infof("block number %d too high, limit is %d", epochLength*2048)
-		return false
+		return false, false
 	}
 
-	difficulty := block.Difficulty()
 	/* Cannot happen if block header diff is validated prior to PoW, but can
 		 happen if PoW is checked first due to parallel PoW checking.
 		 We could check the minimum valid difficulty but for SoC we avoid (duplicating)
 	   Ethereum protocol consensus rules here which are not in scope of Ethash
 	*/
-	if difficulty.Cmp(common.Big0) == 0 {
+	if shareDifficulty.Cmp(common.Big0) == 0 {
+		glog.V(logger.Debug).Infof("invalid share difficulty")
+		return false, false
+	}
+	if blockDifficulty.Cmp(common.Big0) == 0 {
 		glog.V(logger.Debug).Infof("invalid block difficulty")
-		return false
+		return false, false
 	}
 
 	cache := l.getCache(blockNum)
 	dagSize := C.ethash_get_datasize(C.uint64_t(blockNum))
 
-	if l.test {
-		dagSize = dagSizeForTesting
-	}
 	// Recompute the hash using the cache.
 	hash := hashToH256(block.HashNoNonce())
 	ret := C.ethash_light_compute_internal(cache.ptr, dagSize, hash, C.uint64_t(block.Nonce()))
 	if !ret.success {
-		return false
+		return false, false
 	}
 
 	// avoid mixdigest malleability as it's not included in a block's "hashNononce"
 	if block.MixDigest() != h256ToHash(ret.mix_hash) {
-		return false
+		return false, false
 	}
 
 	// Make sure cache is live until after the C call.
@@ -158,8 +158,10 @@ func (l *Light) Verify(block pow.Block) bool {
 	// the finalizer before the call completes.
 	_ = cache
 	// The actual check.
-	target := new(big.Int).Div(maxUint256, difficulty)
-	return h256ToHash(ret.result).Big().Cmp(target) <= 0
+	shareTarget := new(big.Int).Div(maxUint256, shareDifficulty)
+	blockTarget := new(big.Int).Div(maxUint256, blockDifficulty)
+  result := h256ToHash(ret.result).Big()
+	return result.Cmp(shareTarget) <= 0, result.Cmp(blockTarget) <= 0
 }
 
 func h256ToHash(in C.ethash_h256_t) common.Hash {
